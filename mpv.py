@@ -37,6 +37,20 @@ if os.name == 'nt':
                       'If mpv-1.dll is located elsewhere, you can add that path to os.environ["PATH"].')
     backend = CDLL(dll)
     fs_enc = 'utf-8'
+
+elif os.name = "posix":
+    print(">>> OS filesystem - Posix")
+    
+    import locale
+    lc, enc = locale.getlocale(locale.LC_NUMERIC)
+    # libmpv requires LC_NUMERIC to be set to "C". Since messing with global variables everyone else relies upon is
+    # still better than segfaulting, we are setting LC_NUMERIC to "C".
+    locale.setlocale(locale.LC_NUMERIC, 'C')
+    
+    backend = CDLL("libmpv.so.1")
+    fs_enc = sys.getfilesystemencoding()
+    print(">>> Backend - ", backend)
+
 else:
     import locale
     lc, enc = locale.getlocale(locale.LC_NUMERIC)
