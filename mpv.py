@@ -38,7 +38,7 @@ if os.name == 'nt':
     backend = CDLL(dll)
     fs_enc = 'utf-8'
 
-elif os.name = "posix":
+elif os.name == "posix":
     print(">>> OS filesystem - Posix")
     
     import locale
