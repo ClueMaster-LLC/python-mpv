@@ -1,77 +1,67 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # vim: ts=4 sw=4 et
+#
+# Python MPV library module
+# Copyright (C) 2017-2022 Sebastian Götte <code@jaseg.net>
+#
+# This program is free software; you can redistribute it and/or modify it under the terms of the GNU General Public
+# License as published by the Free Software Foundation; either version 2 of the License, or (at your option) any later
+# version.
+#
+# This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied
+# warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License along with this program; if not, write to the Free
+# Software Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+#
 
 import unittest
 from unittest import mock
-import math
 import threading
 from contextlib import contextmanager
-from functools import wraps
-import gc
 import os.path
 import os
-import sys
 import time
-import io
-import platform
-import ctypes
+from concurrent.futures import Future
+
+os.environ["PATH"] = os.path.dirname(__file__) + os.pathsep + os.environ["PATH"]
 
 import mpv
 
-from xvfbwrapper import Xvfb
 
+if os.name == 'nt':
+  Display = mock.Mock()
+  testvo='gpu'
 
-# stdout magic to suppress useless libmpv warning messages in unittest output
-# See https://eli.thegreenplace.net/2015/redirecting-all-kinds-of-stdout-in-python/
-@contextmanager
-def devnull_libmpv():
-    """ Redirect libmpv stdout into /dev/null while still allowing python to print to stdout as usual """
-    if platform.system() != 'Linux':
-        # This is only a linux-specific convenience function.
-        yield
-        return
+else:
+  from pyvirtualdisplay import Display
+  testvo='x11'
 
-    libc = ctypes.CDLL("libc.so.6")
-
-    stderr_fd, stdout_fd = sys.stderr.fileno(), sys.stdout.fileno()
-    sys.stderr.flush()
-    sys.stdout.flush()
-    libc.fflush(None)
-
-    # Preserve a copy so python can continue printing
-    stderr_copy, stdout_copy = os.dup(stderr_fd), os.dup(stdout_fd)
-    sys.stderr = io.TextIOWrapper(open(stderr_copy, 'wb', closefd=False), write_through=True)
-    sys.stdout = io.TextIOWrapper(open(stdout_copy, 'wb', closefd=False))
-    with open(os.devnull, 'w') as devnull:
-        os.dup2(devnull.fileno(), stderr_fd) # closes old stderr
-        os.dup2(devnull.fileno(), stdout_fd) # closes old stdout
-
-    yield
-
-    sys.stderr.flush()
-    sys.stdout.flush()
-    libc.fflush(None)
-    os.dup2(stderr_copy, stderr_fd)
-    os.dup2(stdout_copy, stdout_fd)
-    os.close(stderr_copy)
-    os.close(stdout_copy)
-    sys.stderr = io.TextIOWrapper(open(stderr_fd, 'wb', closefd=False), write_through=True)
-    sys.stdout = io.TextIOWrapper(open(stdout_fd, 'wb', closefd=False))
 
 TESTVID = os.path.join(os.path.dirname(__file__), 'test.webm')
 TESTSRT = os.path.join(os.path.dirname(__file__), 'sub_test.srt')
 MPV_ERRORS = [ l(ec) for ec, l in mpv.ErrorCode.EXCEPTION_DICT.items() if l ]
+SKIP_TESTS = os.environ.get('PY_MPV_SKIP_TESTS', '').split()
+
+
+def timed_print():
+    start_time = time.time()
+    def do_print(level, prefix, text):
+        td = time.time() - start_time
+        print('{:.3f} [{}] {}: {}'.format(td, level, prefix, text), flush=True)
+
 
 class MpvTestCase(unittest.TestCase):
     def setUp(self):
-        self.disp = Xvfb()
+        self.disp = Display()
         self.disp.start()
-        self.m = mpv.MPV(vo='x11')
+        self.m = mpv.MPV(vo=testvo, loglevel='debug', log_handler=timed_print())
 
     def tearDown(self):
         self.m.terminate()
         self.disp.stop()
+
 
 class TestProperties(MpvTestCase):
     @contextmanager
@@ -85,7 +75,6 @@ class TestProperties(MpvTestCase):
             else:
                 raise
 
-    @devnull_libmpv()
     def test_read(self):
         self.m.loop = 'inf'
         self.m.play(TESTVID)
@@ -99,7 +88,6 @@ class TestProperties(MpvTestCase):
                 mpv.ErrorCode.PROPERTY_NOT_FOUND]):
                 getattr(self.m, name)
 
-    @devnull_libmpv()
     def test_write(self):
         self.m.loop = 'inf'
         self.m.play(TESTVID)
@@ -112,6 +100,9 @@ class TestProperties(MpvTestCase):
                 continue
             # These may cause files to be created
             if name in ('external-file', 'heartbeat-cmd', 'wid', 'dump-stats', 'log-file') or name.startswith('input-'):
+                continue
+            # Caues segmentation faults on wayland
+            if name in ('current-window-scale',):
                 continue
             name =  name.replace('-', '_')
             old_canaries = check_canaries()
@@ -219,7 +210,6 @@ class TestProperties(MpvTestCase):
             # See comment in test_property_decoding_invalid_utf8
             self.m.osd.alang
 
-    @devnull_libmpv()
     def test_option_read(self):
         self.m.loop = 'inf'
         self.m.play(TESTVID)
@@ -236,7 +226,6 @@ class TestProperties(MpvTestCase):
 
 
 class ObservePropertyTest(MpvTestCase):
-    @devnull_libmpv()
     def test_observe_property(self):
         handler = mock.Mock()
 
@@ -253,7 +242,6 @@ class ObservePropertyTest(MpvTestCase):
         m.terminate() # needed for synchronization of event thread
         handler.assert_has_calls([mock.call('vid', 'auto')])
 
-    @devnull_libmpv()
     def test_property_observer_decorator(self):
         handler = mock.Mock()
 
@@ -291,7 +279,7 @@ class ObservePropertyTest(MpvTestCase):
         self.assertEqual(m.mute, True)
         self.assertEqual(m.slang, ['ru'])
 
-        time.sleep(0.05)
+        time.sleep(0.1)
         foo.unobserve_mpv_properties()
 
         m.mute = False
@@ -303,6 +291,7 @@ class ObservePropertyTest(MpvTestCase):
             mock.call('mute', True),
             mock.call('slang', ['ru'])],
             any_order=True)
+
 
 class KeyBindingTest(MpvTestCase):
     def test_register_direct_cmd(self):
@@ -377,10 +366,35 @@ class KeyBindingTest(MpvTestCase):
         self.assertNotIn(b('b'), self.m._key_binding_handlers)
         self.assertIn(b('c'), self.m._key_binding_handlers)
 
+    def test_wait_for_event_error_forwarding(self):
+        self.m.play(TESTVID)
+
+        def check(evt):
+            raise ValueError('fnord')
+
+        with self.assertRaises(ValueError):
+            self.m.wait_for_event('end_file', cond=check)
+
+    def test_wait_for_property_error_forwarding(self):
+        def run():
+            nonlocal self
+            self.m.wait_until_playing(timeout=2)
+            self.m.mute = True
+        t = threading.Thread(target=run, daemon=True)
+        t.start()
+
+        def cond(mute):
+            if mute:
+                raise ValueError('fnord')
+
+        with self.assertRaises(ValueError):
+            self.m.play(TESTVID)
+            self.m.wait_for_property('mute', cond=cond)
+
     def test_register_simple_decorator_fun_chaining(self):
         self.m.loop = 'inf'
         self.m.play(TESTVID)
-        self.m.wait_until_playing()
+        self.m.wait_until_playing(timeout=2)
 
         handler1, handler2 = mock.Mock(), mock.Mock()
 
@@ -396,7 +410,7 @@ class KeyBindingTest(MpvTestCase):
         self.assertEqual(reg_test_fun.mpv_key_bindings, ['b', 'a'])
 
         def keypress_and_sync(key):
-            with self.m.prepare_and_wait_for_event('client_message'):
+            with self.m.prepare_and_wait_for_event('client_message', timeout=2):
                 self.m.keypress(key)
 
         keypress_and_sync('a')
@@ -425,15 +439,17 @@ class KeyBindingTest(MpvTestCase):
         handler1.assert_has_calls([])
         handler2.assert_has_calls([ mock.call() ])
 
+
 class TestStreams(unittest.TestCase):
-    @devnull_libmpv()
     def test_python_stream(self):
         handler = mock.Mock()
 
-        disp = Xvfb()
+        disp = Display()
         disp.start()
-        m = mpv.MPV()
-        m.register_event_callback(handler)
+        m = mpv.MPV(vo=testvo)
+        def cb(evt):
+            handler(evt.as_dict(decoder=mpv.lazy_decoder))
+        m.register_event_callback(cb)
 
         @m.python_stream('foo')
         def foo_gen():
@@ -446,34 +462,34 @@ class TestStreams(unittest.TestCase):
 
         m.play('python://foo')
         m.wait_for_playback()
-        handler.assert_any_call({'reply_userdata': 0, 'error': 0, 'event_id': mpv.MpvEventID.END_FILE, 'event': {'reason': mpv.MpvEventEndFile.EOF, 'error': mpv.ErrorCode.SUCCESS}})
+        handler.assert_any_call({'event': 'end-file', 'reason': 'eof', 'playlist_entry_id': 1})
         handler.reset_mock()
 
         m.play('python://bar')
         m.wait_for_playback()
-        handler.assert_any_call({'reply_userdata': 0, 'error': 0, 'event_id': mpv.MpvEventID.END_FILE, 'event': {'reason': mpv.MpvEventEndFile.ERROR, 'error': mpv.ErrorCode.UNKNOWN_FORMAT}})
+        handler.assert_any_call({'event': 'end-file', 'reason': 'error', 'playlist_entry_id': 2, 'file_error': 'unrecognized file format'})
         handler.reset_mock()
 
         m.play('python://baz')
         m.wait_for_playback()
-        handler.assert_any_call({'reply_userdata': 0, 'error': 0, 'event_id': mpv.MpvEventID.END_FILE, 'event': {'reason': mpv.MpvEventEndFile.ERROR, 'error': mpv.ErrorCode.LOADING_FAILED}})
+        handler.assert_any_call({'event': 'end-file', 'reason': 'error', 'playlist_entry_id': 3, 'file_error': 'loading failed'})
         handler.reset_mock()
 
         m.play('foo://foo')
         m.wait_for_playback()
-        handler.assert_any_call({'reply_userdata': 0, 'error': 0, 'event_id': mpv.MpvEventID.END_FILE, 'event': {'reason': mpv.MpvEventEndFile.ERROR, 'error': mpv.ErrorCode.LOADING_FAILED}})
+        handler.assert_any_call({'event': 'end-file', 'reason': 'error', 'playlist_entry_id': 4, 'file_error': 'loading failed'})
         handler.reset_mock()
 
         foo_gen.unregister()
 
         m.play('python://foo')
         m.wait_for_playback()
-        handler.assert_any_call({'reply_userdata': 0, 'error': 0, 'event_id': mpv.MpvEventID.END_FILE, 'event': {'reason': mpv.MpvEventEndFile.ERROR, 'error': mpv.ErrorCode.LOADING_FAILED}})
+        handler.assert_any_call({'event': 'end-file', 'reason': 'error', 'playlist_entry_id': 5, 'file_error': 'loading failed'})
         handler.reset_mock()
 
         m.play('python://bar')
         m.wait_for_playback()
-        handler.assert_any_call({'reply_userdata': 0, 'error': 0, 'event_id': mpv.MpvEventID.END_FILE, 'event': {'reason': mpv.MpvEventEndFile.ERROR, 'error': mpv.ErrorCode.UNKNOWN_FORMAT}})
+        handler.assert_any_call({'event': 'end-file', 'reason': 'error', 'playlist_entry_id': 6, 'file_error': 'unrecognized file format'})
         handler.reset_mock()
 
         m.terminate()
@@ -486,10 +502,12 @@ class TestStreams(unittest.TestCase):
         stream_mock.seek = mock.Mock(return_value=0)
         stream_mock.read = mock.Mock(return_value=b'')
 
-        disp = Xvfb()
+        disp = Display()
         disp.start()
-        m = mpv.MPV(video=False)
-        m.register_event_callback(handler)
+        m = mpv.MPV(vo=testvo, video=False)
+        def cb(evt):
+            handler(evt.as_dict(decoder=mpv.lazy_decoder))
+        m.register_event_callback(cb)
 
         m.register_stream_protocol('pythonfail', fail_mock)
 
@@ -500,22 +518,132 @@ class TestStreams(unittest.TestCase):
 
         m.play('pythondoesnotexist://foo')
         m.wait_for_playback()
-        handler.assert_any_call({'reply_userdata': 0, 'error': 0, 'event_id': mpv.MpvEventID.END_FILE, 'event': {'reason': mpv.MpvEventEndFile.ERROR, 'error': mpv.ErrorCode.LOADING_FAILED}})
+        handler.assert_any_call({'event': 'end-file', 'reason': 'error', 'playlist_entry_id': 1, 'file_error': 'loading failed'})
         handler.reset_mock()
 
         m.play('pythonfail://foo')
         m.wait_for_playback()
-        handler.assert_any_call({'reply_userdata': 0, 'error': 0, 'event_id': mpv.MpvEventID.END_FILE, 'event': {'reason': mpv.MpvEventEndFile.ERROR, 'error': mpv.ErrorCode.LOADING_FAILED}})
+        handler.assert_any_call({'event': 'end-file', 'reason': 'error', 'playlist_entry_id': 2, 'file_error': 'loading failed'})
         handler.reset_mock()
 
         m.play('pythonsuccess://foo')
         m.wait_for_playback()
         stream_mock.seek.assert_any_call(0)
         stream_mock.read.assert_called()
-        handler.assert_any_call({'reply_userdata': 0, 'error': 0, 'event_id': mpv.MpvEventID.END_FILE, 'event': {'reason': mpv.MpvEventEndFile.ERROR, 'error': mpv.ErrorCode.UNKNOWN_FORMAT}})
+        handler.assert_any_call({'event': 'end-file', 'reason': 'error', 'playlist_entry_id': 3, 'file_error': 'unrecognized file format'})
 
         m.terminate()
         disp.stop()
+
+    def test_stream_open_exception(self):
+        disp = Display()
+        disp.start()
+        m = mpv.MPV(vo=testvo, video=False)
+
+        @m.register_stream_protocol('raiseerror')
+        def open_fn(uri):
+            raise SystemError()
+
+        waiting = threading.Semaphore()
+        result = Future()
+        def run():
+            result.set_running_or_notify_cancel()
+            try:
+                waiting.release()
+                m.wait_for_playback()
+                result.set_result(False)
+            except SystemError:
+                result.set_result(True)
+            except Exception:
+                result.set_result(False)
+
+        t = threading.Thread(target=run, daemon=True)
+        t.start()
+
+        with waiting:
+            time.sleep(0.2)
+            m.play('raiseerror://foo')
+
+        m.wait_for_playback(catch_errors=False)
+        try:
+            assert result.result()
+        finally:
+            m.terminate()
+            disp.stop()
+
+    def test_python_stream_exception(self):
+        disp = Display()
+        disp.start()
+        m = mpv.MPV(vo=testvo)
+
+        @m.python_stream('foo')
+        def foo_gen():
+            with open(TESTVID, 'rb') as f:
+                yield f.read(100)
+                raise SystemError()
+
+        waiting = threading.Semaphore()
+        result = Future()
+        def run():
+            result.set_running_or_notify_cancel()
+            try:
+                waiting.release()
+                m.wait_for_playback()
+                result.set_result(False)
+            except SystemError:
+                result.set_result(True)
+            except Exception:
+                result.set_result(False)
+
+        t = threading.Thread(target=run, daemon=True)
+        t.start()
+
+        with waiting:
+            time.sleep(0.2)
+            m.play('python://foo')
+
+        m.wait_for_playback(catch_errors=False)
+        try:
+            assert result.result()
+        finally:
+            m.terminate()
+            disp.stop()
+
+    def test_stream_open_forward(self):
+        disp = Display()
+        disp.start()
+        m = mpv.MPV(vo=testvo, video=False)
+
+        @m.register_stream_protocol('raiseerror')
+        def open_fn(uri):
+            raise ValueError()
+
+        waiting = threading.Semaphore()
+        result = Future()
+        def run():
+            result.set_running_or_notify_cancel()
+            try:
+                waiting.release()
+                m.wait_for_playback()
+                result.set_result(True)
+            except Exception:
+                result.set_result(False)
+
+        t = threading.Thread(target=run, daemon=True)
+        t.start()
+
+        with waiting:
+            time.sleep(0.2)
+            m.play('raiseerror://foo')
+
+        m.wait_for_playback(catch_errors=False)
+        try:
+            assert result.result()
+        finally:
+            m.terminate()
+            disp.stop()
+
+
 
 class TestLifecycle(unittest.TestCase):
     def test_create_destroy(self):
@@ -547,46 +675,50 @@ class TestLifecycle(unittest.TestCase):
     def test_event_callback(self):
         handler = mock.Mock()
         m = mpv.MPV(video=False)
-        m.register_event_callback(handler)
+        def cb(evt):
+            handler(evt.as_dict(decoder=mpv.lazy_decoder))
+        m.register_event_callback(cb)
         m.play(TESTVID)
         m.wait_for_playback()
 
-        m.unregister_event_callback(handler)
+        m.unregister_event_callback(cb)
         handler.assert_has_calls([
-                mock.call({'reply_userdata': 0, 'error': 0, 'event_id': 6, 'event': None}),
-                mock.call({'reply_userdata': 0, 'error': 0, 'event_id': mpv.MpvEventID.END_FILE, 'event': {'reason': mpv.MpvEventEndFile.ERROR, 'error': mpv.ErrorCode.NOTHING_TO_PLAY}})
+                mock.call({'event': 'start-file', 'playlist_entry_id': 1}),
+                mock.call({'event': 'end-file', 'reason': 'error', 'playlist_entry_id': 1, 'file_error': 'no audio or video data played'})
             ], any_order=True)
+        time.sleep(1)
         handler.reset_mock()
-
         m.terminate()
         handler.assert_not_called()
 
-    @devnull_libmpv()
     def test_wait_for_property_negative(self):
-        self.disp = Xvfb()
+        self.disp = Display()
         self.disp.start()
-        m = mpv.MPV()
+        m = mpv.MPV(vo=testvo)
         m.play(TESTVID)
+        result = Future()
         def run():
             nonlocal self
+            result.set_running_or_notify_cancel()
             try:
                 m.wait_for_property('mute')
-                self.fail()
+                result.set_result(False)
             except mpv.ShutdownError:
-                pass
+                result.set_result(True)
         t = threading.Thread(target=run, daemon=True)
         t.start()
         time.sleep(1)
         m.terminate()
+        time.sleep(1)
         t.join()
         self.disp.stop()
+        assert result.result()
 
-    @devnull_libmpv()
     def test_wait_for_property_positive(self):
-        self.disp = Xvfb()
+        self.disp = Display()
         self.disp.start()
         handler = mock.Mock()
-        m = mpv.MPV()
+        m = mpv.MPV(vo=testvo)
         m.play(TESTVID)
         def run():
             nonlocal self
@@ -594,69 +726,100 @@ class TestLifecycle(unittest.TestCase):
             handler()
         t = threading.Thread(target=run, daemon=True)
         t.start()
-        m.wait_until_playing()
+        m.wait_until_playing(timeout=2)
         m.mute = True
         t.join()
         m.terminate()
+        time.sleep(1)
         handler.assert_called()
         self.disp.stop()
 
-    @devnull_libmpv()
     def test_wait_for_event(self):
-        self.disp = Xvfb()
+        self.disp = Display()
         self.disp.start()
-        handler = mock.Mock()
-        m = mpv.MPV()
+        m = mpv.MPV(vo=testvo)
         m.play(TESTVID)
+        result = Future()
         def run():
             nonlocal self
+            result.set_running_or_notify_cancel()
             try:
                 m.wait_for_event('seek')
-                self.fail()
+                result.set_result(False)
             except mpv.ShutdownError:
-                pass
+                result.set_result(True)
         t = threading.Thread(target=run, daemon=True)
         t.start()
         time.sleep(1)
         m.terminate()
         t.join()
         self.disp.stop()
+        assert result.result()
 
-    @devnull_libmpv()
     def test_wait_for_property_shutdown(self):
-        self.disp = Xvfb()
+        self.disp = Display()
         self.disp.start()
-        handler = mock.Mock()
-        m = mpv.MPV()
+        m = mpv.MPV(vo=testvo)
         m.play(TESTVID)
         with self.assertRaises(mpv.ShutdownError):
             # level_sensitive=false needed to prevent get_property on dead
             # handle
             with m.prepare_and_wait_for_property('mute', level_sensitive=False):
                 m.terminate()
+        time.sleep(1)
         self.disp.stop()
 
-    @devnull_libmpv()
-    def test_wait_for_event_shutdown(self):
-        self.disp = Xvfb()
+    @unittest.skipIf('test_wait_for_property_event_overflow' in SKIP_TESTS, reason="kills X-Server first")
+    def test_wait_for_property_event_overflow(self):
+        self.disp = Display()
         self.disp.start()
-        handler = mock.Mock()
-        m = mpv.MPV()
+        m = mpv.MPV(vo=testvo)
+        m.play(TESTVID)
+        with self.assertRaises(mpv.EventOverflowError):
+            # level_sensitive=false needed to prevent get_property on dead
+            # handle
+            with m.prepare_and_wait_for_property('mute', cond=lambda val: time.sleep(0.001)):
+                for i in range(10000):
+                    try:
+                        # We really have to try hard to fill up the queue here. Simple async commands will not work,
+                        # since then command_async will throw a memory error first. Property changes also do not work,
+                        # since they are only processsed when the event loop is idle. This here works reliably.
+                        m.command_async('script-message', 'foo', 'bar')
+                    except:
+                        pass
+        m.terminate()
+        time.sleep(1)
+        self.disp.stop()
+
+    def test_wait_for_event_shutdown(self):
+        self.disp = Display()
+        self.disp.start()
+        m = mpv.MPV(vo=testvo)
         m.play(TESTVID)
         with self.assertRaises(mpv.ShutdownError):
             with m.prepare_and_wait_for_event('seek'):
                 m.terminate()
         self.disp.stop()
 
-    @devnull_libmpv()
+    def test_wait_for_shutdown(self):
+        self.disp = Display()
+        self.disp.start()
+        m = mpv.MPV(vo=testvo)
+        m.play(TESTVID)
+        with self.assertRaises(mpv.ShutdownError):
+            with m.prepare_and_wait_for_event(None) as result:
+                m.terminate()
+            result.result()
+        self.disp.stop()
+
     def test_log_handler(self):
         handler = mock.Mock()
-        self.disp = Xvfb()
+        self.disp = Display()
         self.disp.start()
-        m = mpv.MPV(log_handler=handler)
+        m = mpv.MPV(vo=testvo, log_handler=handler)
         m.play(TESTVID)
         # Wait for playback to start
-        m.wait_until_playing()
+        m.wait_until_playing(timeout=2)
         m.command("print-text", 'This is a python-mpv test')
         m.wait_for_playback()
         m.terminate()
@@ -684,14 +847,32 @@ class CommandTests(MpvTestCase):
     def test_sub_add(self):
         handler = mock.Mock()
         self.m.property_observer('sub-text')(handler)
+        time.sleep(0.5)
 
         self.m.loadfile(TESTVID)
-        self.m.wait_until_playing()
+        self.m.wait_until_playing(timeout=2)
         self.m.sub_add(TESTSRT)
 
         self.m.wait_for_playback()
         handler.assert_any_call('sub-text', 'This is\na subtitle test.')
         handler.assert_any_call('sub-text', 'This is the second subtitle line.')
+
+    def test_async_command(self):
+        handler = mock.Mock()
+        callback = mock.Mock()
+        self.m.property_observer('sub-text')(handler)
+        time.sleep(0.5)
+
+        self.m.loadfile(TESTVID)
+        self.m.wait_until_playing(timeout=2)
+        self.m.command_async('sub_add', TESTSRT, callback=callback)
+        reply = self.m.command_async('expand-text', 'test ${mute}')
+        assert reply.result() == 'test no'
+
+        self.m.wait_for_playback()
+        handler.assert_any_call('sub-text', 'This is\na subtitle test.')
+        handler.assert_any_call('sub-text', 'This is the second subtitle line.')
+        callback.assert_any_call(None, None)
 
 
 class RegressionTests(MpvTestCase):
@@ -747,7 +928,3 @@ class RegressionTests(MpvTestCase):
         m.slang = 'ru'
         m.terminate() # needed for synchronization of event thread
         handler.assert_has_calls([mock.call('slang', ['jp']), mock.call('slang', ['ru'])])
-
-
-if __name__ == '__main__':
-    unittest.main()

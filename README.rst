@@ -11,7 +11,7 @@ Installation
 
 .. code:: bash
 
-    pip install python-mpv
+    pip install mpv
 
 
 ...though you can also realistically just copy `mpv.py`_ into your project as it's all nicely contained in one file.
@@ -32,9 +32,9 @@ On Windows you can place libmpv anywhere in your ``%PATH%`` (e.g. next to ``pyth
 into ctypes, which is different to the one Windows uses internally. Consult `this stackoverflow post
 <https://stackoverflow.com/a/23805306>`__ for details.
 
-Python >= 3.5 (officially)
+Python >= 3.7 (officially)
 ..........................
-The ``master`` branch officially only supports recent python releases (3.5 onwards), but there is the somewhat outdated
+The ``main`` branch officially only supports recent python releases (3.5 onwards), but there is the somewhat outdated
 but functional `py2compat branch`_ providing Python 2 compatibility.
 
 .. _`py2compat branch`: https://github.com/jaseg/python-mpv/tree/py2compat
@@ -64,7 +64,7 @@ Usage
     player.play('https://youtu.be/DOmdB7D-pUU')
     player.wait_for_playback()
 
-python-mpv mostly exposes mpv's built-in API to python, adding only some porcelain on top. Most "`input commands <https://mpv.io/manual/master/#list-of-input-commands>`_" are mapped to methods of the MPV class. Check out these methods and their docstrings in `the source <https://github.com/jaseg/python-mpv/blob/master/mpv.py>`__ for things you can do. Additional controls and status information are exposed through `MPV properties <https://mpv.io/manual/master/#properties>`_. These can be accessed like ``player.metadata``, ``player.fullscreen`` and ``player.loop_playlist``.
+python-mpv mostly exposes mpv's built-in API to python, adding only some porcelain on top. Most "`input commands <https://mpv.io/manual/master/#list-of-input-commands>`_" are mapped to methods of the MPV class. Check out these methods and their docstrings in `the source <https://github.com/jaseg/python-mpv/blob/main/mpv.py>`__ for things you can do. Additional controls and status information are exposed through `MPV properties <https://mpv.io/manual/master/#properties>`_. These can be accessed like ``player.metadata``, ``player.fullscreen`` and ``player.loop_playlist``.
 
 Threading
 ~~~~~~~~~
@@ -121,6 +121,36 @@ Logging, Properties, Python Key Bindings, Screenshots and youtube-dl
     player.wait_for_playback()
 
     del player
+
+Skipping silence using libav filters
+....................................
+
+The following code uses the libav silencedetect filter to skip silence at the beginning of a file. It works by loading
+the filter, then parsing its output from mpv's log. Thanks to Sean DeNigris on github (#202) for the original code!
+
+.. code:: python
+
+    #!/usr/bin/env python3
+    import sys
+    import mpv
+
+    p = mpv.MPV()
+    p.play(sys.argv[1])
+
+    def skip_silence():
+        p.set_loglevel('debug')
+        p.af = 'lavfi=[silencedetect=n=-20dB:d=1]'
+        p.speed = 100
+        def check(evt):
+            toks = evt['event']['text'].split()
+            if 'silence_end:' in toks:
+                return float(toks[2])
+        p.time_pos = p.wait_for_event('log_message', cond=check)
+        p.speed = 1
+        p.af = ''
+
+    skip_silence()
+    p.wait_for_playback()
 
 Video overlays
 ..............
@@ -211,7 +241,8 @@ The easiest way to load custom subtitles from a file is to pass the ``--sub-file
     import mpv
 
     player = mpv.MPV()
-    player.play('test.webm', sub_file='test.srt')
+    player.loadfile('test.webm', sub_file='test.srt')
+    player.wait_for_playback()
 
 Note that you can also pass many other options to ``loadfile``. See the mpv docs for details.
 
@@ -329,26 +360,14 @@ PyGObject embedding
         application = MainClass()
         Gtk.main()
 
-Using OpenGL from PyGObject via new render context API
-......................................................
+Using OpenGL from PyGObject
+...........................
 
 Just like it is possible to render into a GTK widget through X11 windows, it `also is possible to render into a GTK
 widget using OpenGL <https://gist.github.com/jaseg/657e8ecca3267c0d82ec85d40f423caa>`__ through this python API.
 
-Using OpenGL via legacy opengl_cb backend from PyQT
-...................................................
-
-Github user cosven_ has managed to `make mpv render into a Qt widget using OpenGL
-<https://gist.github.com/cosven/b313de2acce1b7e15afda263779c0afc>`__ through this python API.
-
-Using OpenGL via legacy opengl_cb backend from PyGObject
-........................................................
-
-Just like it is possible to render into a Qt widget, it `also is possible to render into a GTK widget
-<https://gist.github.com/trin94/a930f2a13cee1c9fd21cab0393bf4663>`__ through this python API.
-
-Using OpenGL from PyQt5/QML via new render context API
-......................................................
+Using OpenGL from PyQt5/QML
+...........................
 
 Robozman_ has mangaed to `make mpv render into a PyQt5/QML widget using OpenGL
 <https://gitlab.com/robozman/python-mpv-qml-example>`__ through this python API.
@@ -358,6 +377,11 @@ Using mpv inside imgui inside OpenGL via GLFW
 
 dfaker_ has written a demo (`link <https://github.com/dfaker/imgui_glfw_pythonmpv_demo/blob/main/main.py>`__) that uses mpv to render video into an `imgui <https://github.com/ocornut/imgui>`__ UI running on an OpenGL context inside `GLFW <https://www.glfw.org/>`__. Check out their demo to see how to integrate with imgui/OpenGL and how to access properties and manage the lifecycle of an MPV instance.
 
+Running tests
+-------------
+
+Use pytest to run tests.
+
 Coding Conventions
 ------------------
 
@@ -365,8 +389,16 @@ The general aim is `PEP 8`_, with liberal application of the "consistency" secti
 No tabs. Probably don't bother making pure-formatting PRs except if you think it *really* helps readability or it
 *really* irks you if you don't.
 
+License
+-------
+
+python-mpv inherits the underlying libmpv's license, which can be either GPLv2 or later (default) or LGPLv2.1 or later.
+For details, see `the mpv copyright page`_.
+
 .. _`PEP 8`: https://www.python.org/dev/peps/pep-0008/
-.. _`mpv.py`: https://raw.githubusercontent.com/jaseg/python-mpv/master/mpv.py
+.. _`mpv.py`: https://raw.githubusercontent.com/jaseg/python-mpv/main/mpv.py
 .. _cosven: https://github.com/cosven
 .. _Robozman: https://gitlab.com/robozman
 .. _dfaker: https://github.com/dfaker
+.. _`the mpv copyright page`: https://github.com/mpv-player/mpv/blob/master/Copyright
+
